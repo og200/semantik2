@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantik"
+authors = [
+    {name = "Oren Goldschimdt", email = "oren@andalso.net"},
+]
+description = "Semantik v2"
+readme = "README.rst"
+requires-python = ">=3.12"
+dependencies = [
+    'jinja2==3.1.*'
+]
+
+dynamic = ["version"]
+
+[tool.black]
+line-length = 150
+target-version = ['py312']

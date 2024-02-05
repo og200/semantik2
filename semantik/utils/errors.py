@@ -1,0 +1,2 @@
+class SKTypeError(ValueError):
+    pass
