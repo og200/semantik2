@@ -88,6 +88,8 @@ class Type(metaclass=TypeMetaclass):
     # CLASS ATTRIBUTES (overridden)
     #
 
+    parent: "Type" or None
+    children: list["Type"]
     template: str
 
     @classproperty
@@ -108,13 +110,35 @@ class Type(metaclass=TypeMetaclass):
     # INSTANCE METHODS
     #
 
-    def __init__(self):
-        pass
+    def __init__(self, parent=None, **kwargs):
+        # TODO: allow subclasses of Type in type annotations
+
+        self.parent = parent
+        self.children = []
+
+        for k in kwargs:
+            if k not in self.__class__.__annotations__:
+                raise ValueError(f"Unknown attribute {k} for {self.__class__.__name__}")
+
+        for k, typ in self.__class__.__annotations__.items():
+            if k in kwargs:
+                v = kwargs[k]
+                if typ == list[Type]:
+                    if not isinstance(v, list):
+                        raise ValueError(f"Expected list for {k} but got {v!r}")
+                    if not all(isinstance(i, Type) for i in v):
+                        raise ValueError(f"Expected list of {Type} for {k} but got {v!r}")
+                    instances = [i(parent=self) for i in v]
+                    setattr(self, k, instances)
+                    self.children += instances
+                if typ == Type:
+                    instance = v(parent=self)
+                    setattr(self, k, instance)
+                    self.children.append(instance)
+                else:
+                    setattr(self, k, kwargs[k])
 
     def process_template(self) -> (list[str], str):
-        """
-        Process the JINJA template and return the Vue code string that results
-        """
         p = ModifyingTemplateParser(parent=self)
         p.feed(self.template)
         p.close()
@@ -131,13 +155,49 @@ class Type(metaclass=TypeMetaclass):
 
         return p.components, rendered
 
+    def slot(self, slot_name="default"):
+        """
+        Render a slot in the template
+        :param slot_name: name of the slot
+        :param args: arguments to pass to the slot
+        :param kwargs: keyword arguments to pass to the slot
+        """
+        to_render = getattr(self, slot_name)
+        if to_render is None:
+            return ""
+        out = ""
+        components = set()
+        if isinstance(to_render, list):
+            for child_type in to_render:
+                new_components, rendered = child_type.process_template()
+                components = components.union(new_components)
+                out += rendered
+        elif isinstance(to_render, Type):
+            new_components, rendered = to_render.process_template()
+            components = components.union(new_components)
+            out += rendered
+        else:
+            raise TypeError(f"Expected list of Type or Type for {self!r}.{slot_name} but got {to_render!r}")
+
+    @staticmethod
+    def attrs(**kwargs):
+        """
+        Format HTML attributes for a vue component (for use in templates)
+        :param kwargs: attributes
+        :return: a string of HTML attributes
+        """
+        out = ""
+        for k, v in kwargs.items():
+            if v is not None:
+                out += f'{k}="{v}" '
+        return out.strip()
+
     @staticmethod
     def get_template_context(self):
-        return dict()
-
-    def generate(self):
-        components, rendered = self.process_template()
-        return rendered
+        c = dict()
+        c["t"] = self
+        c["attrs"] = self.attrs
+        return c
 
     def __repr__(self):
         return "<Type %s %s>" % (self.class_name, hex(id(self))[-4:])

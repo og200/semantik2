@@ -16,6 +16,6 @@ class ComposableGeneration:
 
     def __add__(self, other: "ComposableGeneration"):
         cg = ComposableGeneration()
-        cg.props = self.props + other.props
+        cg.props = self.props | other.props
         cg.setup = self.setup + other.setup
         cg.imports = self.imports.union(other.imports)
