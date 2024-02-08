@@ -1,4 +1,5 @@
 from html.parser import HTMLParser
+from .html_and_view_tags import HTML_AND_VUE_TAGS
 
 from ..utils.errors import SKTypeError
 
@@ -10,7 +11,6 @@ class ModifyingTemplateParser(HTMLParser):
 
     def __init__(self, *args, parent=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.referenced_components = set()  #: list of all external components referenced by the template
         self.components = set()  #: list of all internal components referenced by the template
         self.refs = dict()  #: dict of ref name => component instance
         self.parent = parent  #: parent component used for error reporting
@@ -22,21 +22,7 @@ class ModifyingTemplateParser(HTMLParser):
         raw = self.get_starttag_text()
         tag = raw[1 : 1 + len(tag)]  # we get the tag directly from raw to retain capitalization
 
-        if tag.lower() in [
-            "template",
-            "component",
-            "transition",
-            "transition-group",
-            "keep-alive",
-            "slot",
-            "transitiongroup",
-            "keepalive",
-        ]:
+        if tag.lower() in HTML_AND_VUE_TAGS:
             return
 
-        if tag in TypeMetaclass.by_class_name:
-            self.components.add(tag)
-        elif tag in TypeMetaclass.by_tag:
-            self.components.add(TypeMetaclass.by_tag[tag].class_name)
-        elif tag and tag not in HTML_AND_VUE_TAGS:
-            warnings.warn("Unknown tag %s found in template on %r" % (tag, self.parent))
+        self.components.add(tag)

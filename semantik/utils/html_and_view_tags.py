@@ -1,4 +1,13 @@
 HTML_AND_VUE_TAGS = {
+    # vue
+    "component",
+    "transition",
+    "transition-group",
+    "keep-alive",
+    "slot",
+    "transitiongroup",
+    "keepalive",
+    # HTML
     "a",
     "abbr",
     "address",

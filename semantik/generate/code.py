@@ -265,6 +265,10 @@ class Var(Let):
     kind = "var"
 
 
+class Const(Let):
+    kind = "const"
+
+
 class Return(Statement):
     body = Property(isArgument=True)
 
@@ -281,6 +285,9 @@ class Fragment(JSObject):
     def __iadd__(self, other):
         self.body.__iadd__(other)
         return self
+
+    def __add__(self, other):
+        return Fragment(self._as_javascript() + (other._as_javascript() if other else ""))
 
     def insert(self, index, value):
         self.body.insert(index, value)
