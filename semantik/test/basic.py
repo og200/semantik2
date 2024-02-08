@@ -1,9 +1,12 @@
 import subprocess
 from pathlib import Path
 
-from semantik.core.type import Type, Endpoint, Composable, generate, DirectoryResolver, GeneratedResolver, TypeMetaclass
+from semantik.core.type import Type
+from semantik.core.resolve import DirectoryResolver, DevExtremeResolver
+from semantik.core.composable import Endpoint, Composable
 from semantik.generate import code
-from semantik.generate.javascript import js
+from semantik.generate.generate import generate_code, generate
+from semantik.generate.javascript import js, dumps
 
 import mova2
 
@@ -22,23 +25,35 @@ class Form(Type):
                 <label>{& field.label &}</label>
             {% endif %}
             <div class="sk-test-field">
-                {& use(field) &}
+                {& use(field, model=type.model) &}
             </div>
+            <dx-button text="Submit"/>
         </div>
         {% endfor %}
     </div>
     """
 
     def compose(self, **kwargs):
-        composable, rendered = super().compose(**kwargs)
-        composable.setup += code.Const(vars=["state"], value=js.vue.reactive({}))
-        return composable, rendered
+        composable = Composable()
+        composable.props |= {self.model: js.Object}
+
+        defaults = {}
+        for field in self.default:
+            defaults |= field.get_default_values()
+        composable.setup += code.Const(vars=["state"], value=js.vue.reactive(defaults))
+        new_composable, rendered = super().compose(**kwargs)
+        c = composable + new_composable
+        return c, rendered
 
 
 class FormField(Type):
 
     model: str
-    label: str
+    label: str = None
+    condition = None
+
+    def get_default_values(self):
+        return {self.model: js.null}
 
 
 class Input(FormField):
@@ -50,8 +65,11 @@ class Input(FormField):
 
     # language=Vue prefix=<template> suffix=</template>
     template = """
-    <input v-model="{& type.model &}" type="text" placeholder="{& self.placeholder &}"/>
+    <input v-model="{& parent_model &}.{& type.model &}" type="text" placeholder="{& type &}"/>
     """
+
+    def compose(self, model=None):
+        return super().compose(parent_model=model)
 
 
 class DropDown(FormField):
@@ -63,13 +81,15 @@ class DropDown(FormField):
     # language=Vue prefix=<template> suffix=</template>
     template = """
     <div>
-        <input v-model="{& type.model &}" type="text" placeholder="Search"/>
+        <input v-model="state.search" type="text" placeholder="Search"/>
         <ul class="sk-test-component">
-            <li class="sk-test-item" v-for="item in {& use(type.items) &}">{{ item.label }}</li>
+            <li class="sk-test-item" v-for="item in {& use(type.items) &}.data">{{ item.flow_name }}.{{ item.insight_name }}</li>
         </ul>
-        <MyView/>
     </div>
     """
+
+    def get_default_values(self):
+        return {self.model: js.null, "search": "test"}
 
 
 class VQEndpoint(Endpoint):
@@ -81,19 +101,40 @@ class VQEndpoint(Endpoint):
 
     def compose(self):
         c = Composable()
-        c.imports = {"import { useQuery } from 'vue-query'"}
-        c.setup = code.Const(
+        c.imports = {"import { useQuery } from '@tanstack/vue-query'": None}
+        c.setup = code.Fragment()
+        c.setup += code.Const(vars=["api"], value=js.vue.inject("api"))
+        parameters = []
+        for parameter in self.parameters.values():
+            parameter = parameter._as_javascript() if hasattr(parameter, "_as_javascript") else parameter
+            if "." in parameter:
+                index = parameter.rindex(".")
+                parameters.append(getattr(js.vue.toRefs(js[parameter[:index]]), parameter[index + 1 :]))
+            else:
+                parameters = [i for i in self.parameters.values()]
+        c.setup += code.Const(
             vars=[self.name],
-            value=js.useQuery(dict(queryKey=[self.name, *self.parameters.values()], queryFn=js.api.get(self.url, self.parameters))),
+            value=js.vue.reactive(
+                js.useQuery(
+                    dict(
+                        queryKey=[self.name, *parameters],
+                        queryFn=js("async () => " + js.api.get(self.url, self.parameters)._as_javascript()),
+                    )
+                ),
+            ),
         )
         return c, self.name
 
 
-DirectoryResolver(Path(mova2.__file__).parent / "web" / "src" / "components" / "screen")
+DirectoryResolver(Path(mova2.__file__).parent / "web" / "src" / "components")
+DirectoryResolver(Path(mova2.__file__).parent / "web" / "src" / "views")
+DevExtremeResolver(Path(mova2.__file__).parent / "web" / "node_modules" / "devextreme-vue" / "esm")
 
 
 @generate
 class MyView(Form):
+
+    model = "state"
 
     class MyComponent1(Input):
         model = "field_1"
@@ -106,54 +147,9 @@ class MyView(Form):
     class MyColumnPicker(DropDown):
         model = "column"
         title = "Pick a column"
-        items = VQEndpoint("columns", "/api/screen/test/columns", {"search": js("search")})
-
-
-def do_generate(location):
-
-    with GeneratedResolver(location):
-
-        for cls, target_location in TypeMetaclass.to_generate.items():
-
-            target_location = target_location or location
-            target_location.mkdir(parents=True, exist_ok=True)
-
-            cmp = cls()
-
-            cmp, template = cmp.compose()
-
-            cmp.imports |= TypeMetaclass.resolve(cmp.components)
-
-            out = ""
-            out += """<script setup>\n"""
-            for i in cmp.imports:
-                out += i + ";\n"
-            if cmp.imports:
-                out += "\n"
-            if cmp.props:
-                pass  # TODO
-            out += cmp.setup._as_javascript() if cmp.setup else ""
-            out += """</script>\n"""
-            out += """<template>\n"""
-            out += template.strip()
-            out += """\n</template>\n"""
-
-            pretty_out = prettify(out)
-
-            with target_location.joinpath(cls.class_name + ".vue").open("wt") as f:
-                f.write(pretty_out)
-
-            return pretty_out
-
-
-def prettify(vue_code):
-    command = "npx prettier --stdin-filepath file.vue"
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-    output, err = process.communicate(input=vue_code.encode())
-    output = output.decode()
-    return output
+        items = VQEndpoint("columns", "/api/screen/calls/columns", {"search": js("state.search")})
 
 
 if __name__ == "__main__":
-    rc = do_generate(Path(mova2.__file__).parent / "web" / "src" / "generated")
+    rc = generate_code(Path(mova2.__file__).parent / "web" / "src" / "generated")
     print(rc)

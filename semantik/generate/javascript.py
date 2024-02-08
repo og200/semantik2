@@ -1,6 +1,6 @@
 import datetime
 import json
-from . import encoder
+from ..utils import encoder
 
 __all__ = ["js", "format_object", "string_or_js"]
 

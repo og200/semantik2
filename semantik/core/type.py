@@ -7,27 +7,19 @@ from collections import ChainMap, defaultdict
 
 import jinja2
 
-from ..generate import code
+from . import composable
+from ..generate.javascript import dumps, format_object
 from ..utils.cases import *
 from ..utils.classproperty import classproperty
 from ..utils.auto_importer import ModifyingTemplateParser
 
-
-__all__ = ["Type", "Endpoint", "Composable", "GeneratingAttribute", "resolver", "generated", "slot", "DirectoryResolver"]
+__all__ = ["Type"]
 
 
 def all_annotations(cls) -> ChainMap:
     """Returns a dictionary-like ChainMap that includes annotations for all
     attributes defined in cls or inherited from superclasses."""
     return ChainMap(*(c.__annotations__ for c in cls.__mro__ if "__annotations__" in c.__dict__))
-
-
-def resolver(func):
-    """
-    Decorator to register a function to resolve a tag name to an import statement
-    """
-    TypeMetaclass.resolvers.append(func)
-    return func
 
 
 def generate(location: str or Path or None = None):
@@ -44,82 +36,6 @@ def generate(location: str or Path or None = None):
         return location
     else:
         return func
-
-
-class DirectoryResolver:
-    """
-    Resolver for a directory of components
-    """
-
-    def __init__(self, directory: str or Path):
-        self.directory = Path(directory) if isinstance(directory, str) else directory
-        TypeMetaclass.resolvers.append(self)
-
-    def __call__(self, tag_name):
-        if "-" in tag_name:
-            kebab = tag_name
-            pascal = kebab_to_pascal(tag_name)
-        elif tag_name[0].isupper():
-            pascal = tag_name
-            kebab = pascal_to_kebab(tag_name)
-        elif tag_name[0].islower():
-            kebab = tag_name
-            pascal = kebab_to_pascal(tag_name)
-        else:
-            raise ValueError(f"Cannot determine type of tag name {tag_name!r}, only kebab-case and PascalCase tags are supported.")
-        for candidate in {kebab, pascal}:
-            if (self.directory / f"{candidate}.vue").exists():
-                return f"import {pascal} from '{self.directory / candidate}.vue'"
-
-    def __enter__(self):
-        TypeMetaclass.resolvers.append(self)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        TypeMetaclass.resolvers.remove(self)
-
-
-class GeneratedResolver(DirectoryResolver):
-
-    def __call__(self, c):
-        if c in TypeMetaclass.by_tag or c in TypeMetaclass.by_class_name:
-            target = TypeMetaclass.by_tag.get(c, None) or TypeMetaclass.by_class_name.get(c, None)
-            if target._location:
-                return f"import {c} from '{target._location}'"
-            else:
-                return f"import {c} from '{self.directory / target.class_name}.vue'"
-
-
-class Composable:
-
-    props: dict = {}  #: defineProps values
-    setup: code.JSObject or None  #: <script setup> code
-    imports: set = set()  #: set of import strings
-    components: set = set()  #: components referenced in the template
-    included: set = set()  #: set of other generated components that have already been included
-
-    def __init__(self):
-        self.imports = {"import * as vue from 'vue'"}
-        self.setup = code.Fragment()
-
-    def __add__(self, other: "Composable"):
-        cg = Composable()
-        cg += other
-        return cg
-
-    def __iadd__(self, other):
-        self.props = self.props | other.props
-        self.setup += other.setup
-        self.imports = self.imports.union(other.imports)
-        self.components = self.components.union(other.components)
-        self.included = self.included.union(other.included)
-        return self
-
-    def __repr__(self):
-        return (
-            f"<Composable props={self.props} setup={self.setup._as_javascript() if self.setup else None!r} "
-            f"imports={self.imports} components={self.components} included={self.included}>"
-        )
 
 
 class TypeMetaclass(type):
@@ -159,13 +75,13 @@ class TypeMetaclass(type):
         return klass
 
     @classmethod
-    def resolve(mcs, components: set[str] or list[str]) -> set[str]:
-        imports = set()
+    def resolve(mcs, components: set[str] or list[str]) -> dict[str, None]:
+        imports = dict()
         for c in components:
             for r in mcs.resolvers:
                 resolved = r(c)
                 if resolved:
-                    imports.add(resolved)
+                    imports[resolved] = None
                     break
         return imports
 
@@ -244,7 +160,8 @@ class Type(metaclass=TypeMetaclass):
                     setattr(self, k, children[k][0])
 
     def compose(self, **kwargs) -> (list[str], str):
-        c = Composable()
+        c = composable.Composable()
+        already_used = dict()
 
         p = ModifyingTemplateParser(parent=self)
         p.feed(self.template)
@@ -256,9 +173,14 @@ class Type(metaclass=TypeMetaclass):
             variable_start_string="{&",
             variable_end_string="&}",
             extensions=["jinja2.ext.i18n"],
+            undefined=jinja2.StrictUndefined,
         )
-        template = jinja2.Template.from_code(env, env.compile(self.template, filename=inspect.getfile(self.__class__)), {}, None)
-        rendered = template.render(self.get_template_context(composable=c) | kwargs)
+        compiled = env.compile(
+            self.template, name=f"{self.__class__.__name__}", filename=inspect.getfile(self.__class__) + f"/{self.__class__.__name__}/template"
+        )
+        template = jinja2.Template.from_code(env, compiled, {}, None)
+        context = self.get_template_context(composable=c, already_used=already_used) | kwargs
+        rendered = template.render(context)
         c.components = c.components.union(p.components)
 
         return c, rendered
@@ -276,28 +198,26 @@ class Type(metaclass=TypeMetaclass):
                 out += f'{k}="{v}" '
         return out.strip()
 
-    def get_template_context(self, composable: Composable) -> dict:
+    def get_template_context(self, already_used, composable: composable.Composable) -> dict:
         c = dict()
         c["type"] = self
         c["attrs"] = self.attrs
-        c["use"] = lambda attribute: self.use_generating_attribute(composable, attribute)
+        c["dumps"] = dumps
+        c["format_object"] = format_object
+        c["use"] = lambda renderable, **kwargs: self.use_renderable(already_used, composable, renderable, **kwargs)
         return c
 
     @staticmethod
-    def use_generating_attribute(composable, generating_attribute) -> t_.Any:
-        new_composable, rendered = generating_attribute.compose()
-        if generating_attribute not in composable.included:
-            composable.included.add(generating_attribute)
+    def use_renderable(already_used, composable, renderable, **kwargs) -> str:
+        if renderable in already_used:
+            return already_used[renderable]
+
+        new_composable, rendered = renderable.compose(**kwargs)
+        if renderable not in composable.included:
+            composable.included.add(renderable)
             composable += new_composable
+        already_used[renderable] = rendered
         return rendered
 
     def __repr__(self):
         return "<Type %s %s>" % (self.class_name, hex(id(self))[-4:])
-
-
-class GeneratingAttribute:
-    pass
-
-
-class Endpoint(GeneratingAttribute):
-    pass
