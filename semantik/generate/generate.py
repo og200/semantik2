@@ -1,10 +1,13 @@
 import subprocess
+import os.path
 from pathlib import Path
 
 from ..core.type import Type, generate, TypeMetaclass
 from ..core.resolve import DirectoryResolver, GeneratedResolver
-from ..generate.javascript import js
+from ..generate.javascript import js, dumps
 from ..generate import code
+
+__all__ = ["generate_code"]
 
 
 def generate_code(location: Path):
@@ -15,7 +18,25 @@ def generate_code(location: Path):
     deleted = set()
     unchanged = set()
 
+    def write_if_changed(file_name: Path, content: str):
+        all_files.add(file_name)
+        if file_name.exists():
+            with file_name.open("rt") as fp:
+                if fp.read() == content:
+                    return unchanged.add(file_name)
+                else:
+                    changed.add(file_name)
+        else:
+            created.add(file_name)
+
+        with file_name.open("wt") as fp:
+            fp.write(content)
+
     with GeneratedResolver(location):
+
+        routes = []
+
+        routes_file = location / "routes.js"
 
         for cls, target_location in TypeMetaclass.to_generate.items():
 
@@ -26,7 +47,13 @@ def generate_code(location: Path):
 
             cmp, template = cmp.compose()
 
-            cmp.imports |= TypeMetaclass.resolve(cmp.components)
+            imports = dict()
+            for canonical, path in TypeMetaclass.resolve(cmp.components).items():
+                rel_path = os.path.relpath(str(path), str(location))
+                if "/" not in rel_path:
+                    rel_path = "./" + rel_path
+                imports[f"import {canonical} from '{rel_path}'"] = None
+            cmp.imports |= imports
 
             out = ""
             out += """<script setup>\n"""
@@ -45,19 +72,21 @@ def generate_code(location: Path):
             pretty_out = prettify(out)
 
             out_file = target_location.joinpath(cls.class_name + ".vue")
-            all_files.add(out_file)
-            if out_file.exists():
-                with out_file.open("rt") as f:
-                    if f.read() == pretty_out:
-                        unchanged.add(out_file)
-                        continue
-                    else:
-                        changed.add(out_file)
-            else:
-                created.add(out_file)
+            write_if_changed(out_file, pretty_out)
 
-            with out_file.open("wt") as f:
-                f.write(pretty_out)
+            if getattr(cls, "_route", None):
+                desc = dict(**cls._route)
+                resolved = TypeMetaclass.resolve({cls.class_name})
+
+                fn = list(resolved.items())[0][1]
+                new_path = os.path.relpath(str(fn), str(location))
+                if "/" not in new_path:
+                    new_path = "./" + new_path
+                desc["component"] = js(f"() => import('{new_path}.vue')")
+                routes.append(desc)
+
+        pretty_out = prettify(f"export default {dumps(routes)}")
+        write_if_changed(routes_file, pretty_out)
 
         for file in location.glob("**/*.vue"):
             if file not in all_files:

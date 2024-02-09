@@ -1,7 +1,7 @@
-import subprocess
+import typing as t_
 from pathlib import Path
 
-from semantik.core.type import Type
+from semantik.core.type import Type, parameter, slot
 from semantik.core.resolve import DirectoryResolver, DevExtremeResolver
 from semantik.core.composable import Endpoint, Composable
 from semantik.generate import code
@@ -13,8 +13,8 @@ import mova2
 
 class Form(Type):
 
-    default: list[Type]
-    model: str
+    default: slot()
+    model: parameter(str, True)
 
     # language=Vue prefix=<template> suffix=</template>
     template = """    
@@ -48,9 +48,9 @@ class Form(Type):
 
 class FormField(Type):
 
-    model: str
-    label: str = None
-    condition = None
+    model: parameter(str, True)
+    label: parameter(str)
+    condition: parameter(t_.Callable)
 
     def get_default_values(self):
         return {self.model: js.null}
@@ -58,14 +58,14 @@ class FormField(Type):
 
 class Input(FormField):
 
-    model: str
-    label: str
-    type: str = "text"
-    placeholder: str
+    model: parameter(str)
+    label: parameter(str)
+    type: parameter(str) = "text"
+    placeholder: parameter(str) = ""
 
     # language=Vue prefix=<template> suffix=</template>
     template = """
-    <input v-model="{& parent_model &}.{& type.model &}" type="text" placeholder="{& type &}"/>
+    <input v-model="{& parent_model &}.{& type.model &}" type="text" placeholder="{& type.placeholder &}"/>
     """
 
     def compose(self, model=None):
@@ -74,9 +74,9 @@ class Input(FormField):
 
 class DropDown(FormField):
 
-    model: str
-    label: str
-    items: Endpoint
+    model: parameter(str)
+    label: parameter(str)
+    items: parameter(Endpoint)
 
     # language=Vue prefix=<template> suffix=</template>
     template = """
@@ -90,6 +90,16 @@ class DropDown(FormField):
 
     def get_default_values(self):
         return {self.model: js.null, "search": "test"}
+
+
+class DummyEndpoint:
+
+    def __init__(self, items: dict[str : t_.Any]):
+        self.items = items
+
+    def compose(self):
+        c = Composable()
+        return c, dumps(self.items)
 
 
 class VQEndpoint(Endpoint):
@@ -147,7 +157,11 @@ class MyView(Form):
     class MyColumnPicker(DropDown):
         model = "column"
         title = "Pick a column"
-        items = VQEndpoint("columns", "/api/screen/calls/columns", {"search": js("state.search")})
+
+        class items(VQEndpoint):
+            name = "columns"
+            url = "/api/screen/calls/columns"
+            parameters = {"search": js("state.search")}
 
 
 if __name__ == "__main__":

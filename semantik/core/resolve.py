@@ -57,7 +57,7 @@ class DirectoryResolver(BaseResolver):
         canonical = kebab_to_pascal(tag_name) if "-" in tag_name else tag_name
         for candidate in candidates:
             if candidate in self.files:
-                return f"import {canonical} from '{str(self.files[candidate])}'"
+                return canonical, str(self.files[candidate])
 
 
 class GeneratedResolver(DirectoryResolver):
@@ -66,9 +66,9 @@ class GeneratedResolver(DirectoryResolver):
         if c in type.TypeMetaclass.by_tag or c in type.TypeMetaclass.by_class_name:
             target = type.TypeMetaclass.by_tag.get(c, None) or type.TypeMetaclass.by_class_name.get(c, None)
             if target._location:
-                return f"import {c} from '{target._location}'"
+                return c, target._location
             else:
-                return f"import {c} from '{self.directory / target.class_name}.vue'"
+                return c, self.directory / target.class_name
 
 
 class DevExtremeResolver(BaseResolver):
@@ -117,4 +117,4 @@ class DevExtremeResolver(BaseResolver):
         for candidate in candidates:
             if candidate in self.components:
                 canonical, file = self.components[candidate]
-                return f"import {canonical} from '{str(file)}'"
+                return canonical, file
